@@ -24,14 +24,22 @@ impl Sfx {
         pcm.len() as f32 / 2.0 / ASSET_HZ - self.lead()
     }
 
+    pub fn gain(self) -> f32 {
+        match self {
+            Sfx::Insert => 2.8,
+            Sfx::Eject => 1.0,
+        }
+    }
+
     pub fn render(self, sample_rate: u32) -> Vec<i16> {
         let pcm = match self {
             Sfx::Insert => INSERT,
             Sfx::Eject => EJECT,
         };
+        let gain = self.gain();
         let mut out = Vec::with_capacity(pcm.len());
         for v in resampled(pcm, sample_rate) {
-            let s = v.clamp(-32768.0, 32767.0) as i16;
+            let s = (v * gain).clamp(-32768.0, 32767.0) as i16;
             out.push(s);
             out.push(s);
         }

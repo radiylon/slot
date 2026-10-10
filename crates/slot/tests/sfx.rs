@@ -46,6 +46,24 @@ fn the_clips_are_the_recording_and_nothing_else() {
 }
 
 #[test]
+fn the_insert_is_boosted_to_sit_with_the_game_without_clipping() {
+    let peak = |s: Sfx| {
+        s.render(48_000)
+            .iter()
+            .map(|v| v.unsigned_abs())
+            .max()
+            .unwrap()
+    };
+    let ins = peak(Sfx::Insert);
+    let ej = peak(Sfx::Eject);
+    assert!(
+        ins as f32 > ej as f32 * 2.5,
+        "the insert peaks at {ins} against the eject's {ej}: it is no louder than the recording"
+    );
+    assert!(ins < 32_767, "the insert clips at {ins}");
+}
+
+#[test]
 fn the_two_directions_are_different_clips() {
     let ins = Sfx::Insert.render(48_000);
     let ej = Sfx::Eject.render(48_000);
