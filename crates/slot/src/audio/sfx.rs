@@ -27,7 +27,7 @@ impl Sfx {
     pub fn gain(self) -> f32 {
         match self {
             Sfx::Insert => 3.0,
-            Sfx::Eject => 1.0,
+            Sfx::Eject => 3.0,
         }
     }
 

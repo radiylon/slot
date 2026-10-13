@@ -46,28 +46,28 @@ fn the_clips_are_the_recording_and_nothing_else() {
 }
 
 #[test]
-fn the_insert_is_boosted_to_sit_with_the_game_without_audible_clipping() {
-    let peak = |s: Sfx| {
-        s.render(48_000)
-            .iter()
-            .map(|v| v.unsigned_abs())
-            .max()
-            .unwrap()
+fn both_cart_sounds_are_boosted_alike_without_audible_clipping() {
+    let rms = |s: Sfx| {
+        let v = s.render(48_000);
+        (v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt()
     };
-    let ins = peak(Sfx::Insert);
-    let ej = peak(Sfx::Eject);
+    for s in [Sfx::Insert, Sfx::Eject] {
+        assert!(s.gain() > 2.5, "{s:?} is left at the recording's level");
+        let clipped = s
+            .render(48_000)
+            .chunks_exact(2)
+            .filter(|c| c[0].unsigned_abs() >= 32_767)
+            .count();
+        assert!(
+            clipped <= 2,
+            "{clipped} {s:?} samples sit at full scale: the boost is flattening the click"
+        );
+    }
+    let (ins, ej) = (rms(Sfx::Insert), rms(Sfx::Eject));
+    let apart = 20.0 * (ins / ej).log10();
     assert!(
-        ins as f32 > ej as f32 * 2.5,
-        "the insert peaks at {ins} against the eject's {ej}: it is no louder than the recording"
-    );
-    let clipped = Sfx::Insert
-        .render(48_000)
-        .chunks_exact(2)
-        .filter(|c| c[0].unsigned_abs() >= 32_767)
-        .count();
-    assert!(
-        clipped <= 2,
-        "{clipped} insert samples sit at full scale: the boost is flattening the click"
+        apart.abs() < 1.0,
+        "the insert and eject are {apart:.1} dB apart: one is louder than the other"
     );
 }
 
