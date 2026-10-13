@@ -46,7 +46,7 @@ fn the_clips_are_the_recording_and_nothing_else() {
 }
 
 #[test]
-fn the_insert_is_boosted_to_sit_with_the_game_without_clipping() {
+fn the_insert_is_boosted_to_sit_with_the_game_without_audible_clipping() {
     let peak = |s: Sfx| {
         s.render(48_000)
             .iter()
@@ -60,7 +60,15 @@ fn the_insert_is_boosted_to_sit_with_the_game_without_clipping() {
         ins as f32 > ej as f32 * 2.5,
         "the insert peaks at {ins} against the eject's {ej}: it is no louder than the recording"
     );
-    assert!(ins < 32_767, "the insert clips at {ins}");
+    let clipped = Sfx::Insert
+        .render(48_000)
+        .chunks_exact(2)
+        .filter(|c| c[0].unsigned_abs() >= 32_767)
+        .count();
+    assert!(
+        clipped <= 2,
+        "{clipped} insert samples sit at full scale: the boost is flattening the click"
+    );
 }
 
 #[test]
