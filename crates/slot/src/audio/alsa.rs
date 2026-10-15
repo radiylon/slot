@@ -16,13 +16,52 @@ const SND_PCM_FORMAT_S16_LE: c_int = 2;
 const SND_PCM_ACCESS_RW_INTERLEAVED: c_int = 3;
 const CHANNELS: c_uint = 2;
 
-const LATENCY_US: c_uint = 40_000;
+pub const LATENCY_US: c_uint = 40_000;
+
+pub const BLUETOOTH_LATENCY_US: c_uint = 20_000;
 
 const PERIOD_FRAMES: usize = 512;
 
 const RELEASE_AFTER: Duration = Duration::from_secs(3);
 
+/// Closing and reopening a headphone stream inside a few seconds leaves AirPods silent, and
+/// every reopen costs the headphones' wake-up, so a rewind or a pause holds the stream.
+const BLUETOOTH_RELEASE_AFTER: Duration = Duration::from_secs(60);
+
+fn release_after(route: Option<&str>) -> Duration {
+    match route {
+        Some(_) => BLUETOOTH_RELEASE_AFTER,
+        None => RELEASE_AFTER,
+    }
+}
+
 const DEVICES: [&str; 4] = ["plug:default", "default", "plughw:0,0", "hw:0,0"];
+
+const ROUTE_CHECK: Duration = Duration::from_millis(250);
+
+const ROUTE_RETRY: Duration = Duration::from_secs(1);
+
+const DELAY_REPORT: Duration = Duration::from_secs(10);
+
+/// The ALSA device bluetooth.sh routes to, or None for the speaker. The file stays while
+/// the headphones drop out, so their silence is never filled by the speaker.
+fn route() -> Option<String> {
+    let path = std::env::var_os("SLOT_BT_ROUTE").unwrap_or_else(|| "/run/slot-bt-route".into());
+    bluetooth_device(&std::fs::read_to_string(path).ok()?)
+}
+
+/// One plug in front of BlueALSA converts 32768 Hz to the headphones' 48 kHz. Opening it
+/// through "plug:default" would stack a second plug and trip alsa-lib's own assertion.
+pub fn bluetooth_device(route: &str) -> Option<String> {
+    let mac = route
+        .trim()
+        .strip_prefix("bluealsa:DEV=")?
+        .strip_suffix(",PROFILE=a2dp")?;
+    let parts: Vec<&str> = mac.split(':').collect();
+    let hex = |p: &&str| p.len() == 2 && p.bytes().all(|b| b.is_ascii_hexdigit());
+    (parts.len() == 6 && parts.iter().all(hex))
+        .then(|| format!("plug:SLAVE='bluealsa:DEV={mac},PROFILE=a2dp'"))
+}
 
 type PcmOpen = unsafe extern "C" fn(*mut *mut c_void, *const c_char, c_int, c_int) -> c_int;
 type PcmSetParams =
@@ -31,6 +70,7 @@ type PcmWritei = unsafe extern "C" fn(*mut c_void, *const c_void, u64) -> i64;
 type PcmRecover = unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_int;
 type PcmDrop = unsafe extern "C" fn(*mut c_void) -> c_int;
 type PcmClose = unsafe extern "C" fn(*mut c_void) -> c_int;
+type PcmDelay = unsafe extern "C" fn(*mut c_void, *mut std::ffi::c_long) -> c_int;
 type StrError = unsafe extern "C" fn(c_int) -> *const c_char;
 
 struct Alsa {
@@ -40,6 +80,7 @@ struct Alsa {
     recover: PcmRecover,
     drop: PcmDrop,
     close: PcmClose,
+    delay: PcmDelay,
     strerror: StrError,
     _lib: Library,
 }
@@ -63,6 +104,7 @@ impl Alsa {
                 recover: get!("snd_pcm_recover"),
                 drop: get!("snd_pcm_drop"),
                 close: get!("snd_pcm_close"),
+                delay: get!("snd_pcm_delay"),
                 strerror: get!("snd_strerror"),
                 _lib: lib,
             })
@@ -79,9 +121,13 @@ impl Alsa {
         }
     }
 
-    fn open_pcm(&self, rate: u32) -> Result<*mut c_void, AudioError> {
+    fn open_pcm(&self, rate: u32, route: Option<&str>) -> Result<*mut c_void, AudioError> {
         let mut last = AudioError::NoDevice;
-        for name in DEVICES {
+        let (names, latency): (Vec<&str>, c_uint) = match route {
+            Some(device) => (vec![device], bluetooth_latency_us()),
+            None => (DEVICES.to_vec(), LATENCY_US),
+        };
+        for name in names {
             let Ok(cname) = CString::new(name) else {
                 continue;
             };
@@ -99,7 +145,7 @@ impl Alsa {
                     CHANNELS,
                     rate,
                     1,
-                    LATENCY_US,
+                    latency,
                 )
             };
             if err < 0 {
@@ -107,7 +153,10 @@ impl Alsa {
                 last = AudioError::Config(format!("{name}: {}", self.message(err)));
                 continue;
             }
-            eprintln!("slot: audio {name} at {rate} Hz");
+            eprintln!(
+                "slot: audio {name} at {rate} Hz, {} ms buffer",
+                latency / 1000
+            );
             return Ok(pcm);
         }
         Err(last)
@@ -197,23 +246,61 @@ struct Playback {
     pcm: Option<*mut c_void>,
     rate: u32,
     failing: bool,
+    route: Option<String>,
+    route_at: Instant,
+    retry_at: Instant,
+    reported_at: Instant,
+}
+
+/// A whole number of milliseconds from the environment, for tuning headphone latency on
+/// the device without a rebuild.
+fn tuned_ms(name: &str) -> Option<u32> {
+    std::env::var(name)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+        .filter(|ms| (5..=500).contains(ms))
+}
+
+fn bluetooth_latency_us() -> c_uint {
+    tuned_ms("SLOT_BT_LATENCY_MS").map_or(BLUETOOTH_LATENCY_US, |ms| ms * 1000)
+}
+
+fn reopen_ring(ring: &Ring, sample_rate: u32, route: Option<&str>) {
+    match route {
+        Some(_) => {
+            let frames = tuned_ms("SLOT_BT_RING_MS").map_or_else(
+                || super::bluetooth_ring_capacity(sample_rate),
+                |ms| sample_rate as usize * ms as usize / 1000,
+            );
+            ring.reopen_with(sample_rate, frames)
+        }
+        None => ring.reopen(sample_rate),
+    }
 }
 
 fn play(ring: &Arc<Ring>, sample_rate: u32) -> Result<Playback, AudioError> {
     let alsa = Alsa::load()?;
-    let pcm = match alsa.open_pcm(sample_rate) {
+    let route = route();
+    let pcm = match alsa.open_pcm(sample_rate, route.as_deref()) {
         Ok(pcm) => Some(pcm),
         Err(e) => {
             eprintln!("slot: audio: {e}, retrying");
             None
         }
     };
-    ring.reopen(sample_rate);
+    reopen_ring(ring, sample_rate, route.as_deref());
+    let now = Instant::now();
     Ok(Playback {
         alsa,
         pcm,
         rate: sample_rate,
         failing: pcm.is_none(),
+        route,
+        route_at: now,
+        retry_at: now,
+        reported_at: now,
     })
 }
 
@@ -221,9 +308,12 @@ impl Playback {
     fn run(&mut self, ring: &Ring, stop: &AtomicBool) {
         let mut buf = vec![0i16; PERIOD_FRAMES * CHANNELS as usize];
         let span = Duration::from_secs_f64(PERIOD_FRAMES as f64 / self.rate as f64);
-        let mut silence = Silence::new(RELEASE_AFTER);
+        let mut silence = Silence::new(release_after(self.route.as_deref()));
         let mut pace = Pacer::new(span);
         while !stop.load(Ordering::Relaxed) {
+            if self.follow_route(ring) {
+                silence = Silence::new(release_after(self.route.as_deref()));
+            }
             ring.fill(&mut buf);
             let hold = silence.hear(&buf, span);
             match (self.pcm, hold) {
@@ -231,26 +321,34 @@ impl Playback {
                     self.release();
                     eprintln!("slot: audio released after silence");
                 }
-                (None, true) => match self.alsa.open_pcm(self.rate) {
-                    Ok(pcm) => {
-                        eprintln!("slot: audio reopened at {:.1} ms", crate::boot_time::ms());
-                        self.pcm = Some(pcm);
-                        self.failing = false;
-                    }
-                    Err(e) => {
-                        if !self.failing {
-                            eprintln!("slot: audio: {e}, retrying");
-                            self.failing = true;
+                (None, true) if Instant::now() >= self.retry_at => {
+                    match self.alsa.open_pcm(self.rate, self.route.as_deref()) {
+                        Ok(pcm) => {
+                            eprintln!("slot: audio reopened at {:.1} ms", crate::boot_time::ms());
+                            self.pcm = Some(pcm);
+                            self.failing = false;
+                        }
+                        Err(e) => {
+                            if !self.failing {
+                                eprintln!("slot: audio: {e}, retrying");
+                                self.failing = true;
+                            }
+                            if self.route.is_some() {
+                                self.retry_at = Instant::now() + ROUTE_RETRY;
+                            }
                         }
                     }
-                },
+                }
                 _ => {}
             }
             match self.pcm {
                 Some(pcm) => {
                     pace.reset();
+                    self.report_delay(pcm, ring);
                     if !self.write(pcm, &buf) {
-                        return;
+                        self.release();
+                        self.failing = true;
+                        self.retry_at = Instant::now() + ROUTE_RETRY;
                     }
                 }
                 None => std::thread::sleep(pace.wait(Instant::now())),
@@ -258,8 +356,51 @@ impl Playback {
         }
     }
 
+    /// How far behind the picture the headphones play: what the ring holds plus what ALSA,
+    /// BlueALSA and the headphones themselves report holding.
+    fn report_delay(&mut self, pcm: *mut c_void, ring: &Ring) {
+        if self.route.is_none() || self.reported_at.elapsed() < DELAY_REPORT {
+            return;
+        }
+        self.reported_at = Instant::now();
+        let mut frames: std::ffi::c_long = 0;
+        if unsafe { (self.alsa.delay)(pcm, &mut frames) } < 0 {
+            return;
+        }
+        let ms = |f: f64| 1000.0 * f / f64::from(self.rate);
+        eprintln!(
+            "slot: audio: headphones {:.0} ms behind ({:.0} ms in the ring, {:.0} ms past it), {} underrun samples",
+            ms(frames as f64 + ring.queued_frames() as f64),
+            ms(ring.queued_frames() as f64),
+            ms(frames as f64),
+            ring.underruns()
+        );
+    }
+
+    fn follow_route(&mut self, ring: &Ring) -> bool {
+        if self.route_at.elapsed() < ROUTE_CHECK {
+            return false;
+        }
+        self.route_at = Instant::now();
+        let route = route();
+        if route == self.route {
+            return false;
+        }
+        eprintln!(
+            "slot: audio route {}",
+            route.as_deref().unwrap_or("speaker")
+        );
+        self.release();
+        self.route = route;
+        self.failing = false;
+        self.retry_at = Instant::now();
+        reopen_ring(ring, self.rate, self.route.as_deref());
+        true
+    }
+
     fn write(&self, pcm: *mut c_void, buf: &[i16]) -> bool {
         let mut written = 0;
+        let mut stalled = 0;
         while written < PERIOD_FRAMES {
             let at = written * CHANNELS as usize;
             let frames = unsafe {
@@ -276,6 +417,14 @@ impl Playback {
                     return false;
                 }
                 continue;
+            }
+            if frames == 0 {
+                stalled += 1;
+                if stalled >= 5 {
+                    eprintln!("slot: audio: the device stopped taking sound");
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
             }
             written += frames as usize;
         }
@@ -295,5 +444,51 @@ impl Playback {
 impl Drop for Playback {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_route_to_headphones_opens_them_through_a_single_plug() {
+        assert_eq!(
+            bluetooth_device("bluealsa:DEV=74:77:86:15:3A:A5,PROFILE=a2dp\n").as_deref(),
+            Some("plug:SLAVE='bluealsa:DEV=74:77:86:15:3A:A5,PROFILE=a2dp'")
+        );
+    }
+
+    #[test]
+    fn a_route_that_is_not_one_pair_of_headphones_is_ignored() {
+        for route in [
+            "",
+            "default",
+            "bluealsa:DEV=74:77:86:15:3A,PROFILE=a2dp",
+            "bluealsa:DEV=74:77:86:15:3A:ZZ,PROFILE=a2dp",
+            "bluealsa:DEV=74:77:86:15:3A:A5,PROFILE=sco",
+            "bluealsa:DEV=74:77:86:15:3A:A5',PROFILE=a2dp",
+        ] {
+            assert_eq!(
+                bluetooth_device(route),
+                None,
+                "{route:?} was taken as headphones"
+            );
+        }
+    }
+
+    const _HEADPHONES_BUFFER_LESS: () = assert!(BLUETOOTH_LATENCY_US < LATENCY_US);
+
+    #[test]
+    fn headphones_hold_their_stream_through_a_rewind() {
+        assert_eq!(release_after(None), RELEASE_AFTER);
+        assert!(release_after(Some("plug:SLAVE='bluealsa'")) >= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn headphones_hold_less_sound_ahead_than_the_speaker() {
+        assert!(
+            super::super::bluetooth_ring_capacity(32_768) < super::super::ring_capacity(32_768)
+        );
     }
 }

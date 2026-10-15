@@ -8,6 +8,9 @@ pub const BRIGHTNESS_MAX: u8 = 9;
 pub const BLUE_LIGHT_MAX: u8 = 9;
 pub const VOLUME_MAX: u8 = 100;
 
+/// Headphones start quiet: their own volume is whatever the last phone left it at.
+pub const VOLUME_BT_DEFAULT: u8 = 40;
+
 pub const UTC_OFFSET_MIN: i16 = -720;
 pub const UTC_OFFSET_MAX: i16 = 840;
 
@@ -27,6 +30,10 @@ pub struct SlotState {
     pub volume_hp: u8,
     pub muted: bool,
     pub muted_hp: bool,
+    pub bluetooth: bool,
+    pub bt_device: Option<String>,
+    pub volume_bt: u8,
+    pub muted_bt: bool,
     pub clock_set: bool,
     pub utc_offset_min: i16,
     pub rumble: bool,
@@ -100,6 +107,10 @@ impl Default for SlotState {
             volume_hp: 60,
             muted: false,
             muted_hp: false,
+            bluetooth: false,
+            bt_device: None,
+            volume_bt: VOLUME_BT_DEFAULT,
+            muted_bt: false,
             clock_set: false,
             utc_offset_min: 0,
             rumble: true,
@@ -132,7 +143,7 @@ pub fn read_slot_state(root: &Path) -> SlotState {
 
 pub fn write_slot_state(root: &Path, s: &SlotState) -> std::io::Result<()> {
     let text = format!(
-        "cart={}\ncart_platform={}\nbrightness={}\nblue_light={}\nvolume={}\nvolume_hp={}\nmuted={}\nmuted_hp={}\nclock_set={}\nutc_offset_min={}\nrumble={}\nff_speed={}\nff_sound={}\ncolour_correction={}\nshader_gba={}\nshader_gb={}\neject_save={}\nturbo={}\nrewind={}\nrunahead={}\ngb_palettes={}\ngb_palette={}\n",
+        "cart={}\ncart_platform={}\nbrightness={}\nblue_light={}\nvolume={}\nvolume_hp={}\nmuted={}\nmuted_hp={}\nbluetooth={}\nbt_device={}\nvolume_bt={}\nmuted_bt={}\nclock_set={}\nutc_offset_min={}\nrumble={}\nff_speed={}\nff_sound={}\ncolour_correction={}\nshader_gba={}\nshader_gb={}\neject_save={}\nturbo={}\nrewind={}\nrunahead={}\ngb_palettes={}\ngb_palette={}\n",
         s.cart.as_deref().unwrap_or(""),
         s.cart_platform.map_or(String::new(), platform_key),
         s.brightness,
@@ -141,6 +152,10 @@ pub fn write_slot_state(root: &Path, s: &SlotState) -> std::io::Result<()> {
         s.volume_hp,
         s.muted as u8,
         s.muted_hp as u8,
+        s.bluetooth as u8,
+        s.bt_device.as_deref().unwrap_or(""),
+        s.volume_bt,
+        s.muted_bt as u8,
         s.clock_set as u8,
         s.utc_offset_min,
         s.rumble as u8,
@@ -168,6 +183,10 @@ fn parse(text: &str) -> Option<SlotState> {
     let mut volume_hp = None;
     let mut muted = None;
     let mut muted_hp = None;
+    let mut bluetooth = None;
+    let mut bt_device = None;
+    let mut volume_bt = None;
+    let mut muted_bt = None;
     let mut clock_set = None;
     let mut utc_offset_min = None;
     let mut rumble = None;
@@ -195,6 +214,10 @@ fn parse(text: &str) -> Option<SlotState> {
             "volume_hp" => volume_hp = Some(level(value, VOLUME_MAX)?),
             "muted" => muted = Some(level(value, 1)? == 1),
             "muted_hp" => muted_hp = Some(level(value, 1)? == 1),
+            "bluetooth" => bluetooth = flag(value),
+            "bt_device" => bt_device = Some(value.to_string()),
+            "volume_bt" => volume_bt = level(value, VOLUME_MAX),
+            "muted_bt" => muted_bt = flag(value),
             "clock_set" => clock_set = Some(level(value, 1)? == 1),
             "utc_offset_min" => utc_offset_min = Some(offset(value)?),
             "rumble" => rumble = flag(value),
@@ -223,6 +246,10 @@ fn parse(text: &str) -> Option<SlotState> {
         volume_hp: volume_hp.or(volume)?,
         muted: muted?,
         muted_hp: muted_hp.or(muted)?,
+        bluetooth: bluetooth.unwrap_or(fallback.bluetooth),
+        bt_device: bt_device.filter(|d| !d.is_empty()),
+        volume_bt: volume_bt.unwrap_or(fallback.volume_bt),
+        muted_bt: muted_bt.unwrap_or(fallback.muted_bt),
         clock_set: clock_set?,
         utc_offset_min: utc_offset_min?,
         rumble: rumble.unwrap_or(fallback.rumble),

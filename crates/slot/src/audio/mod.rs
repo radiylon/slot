@@ -10,10 +10,11 @@ mod stub;
 pub mod volume;
 
 pub use alsa::AlsaSink;
+pub use alsa::{bluetooth_device, BLUETOOTH_LATENCY_US, LATENCY_US};
 #[cfg(feature = "host")]
 pub use host::HostAudio;
 pub use pacer::Pacer;
-pub use ring::{ring_capacity, Ring};
+pub use ring::{bluetooth_ring_capacity, ring_capacity, Ring};
 pub use sfx::Sfx;
 pub use silence::Silence;
 pub use sink::{AudioError, AudioSink};

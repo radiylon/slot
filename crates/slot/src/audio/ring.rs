@@ -8,6 +8,12 @@ pub fn ring_capacity(sample_rate: u32) -> usize {
     sample_rate as usize * 8 / 60
 }
 
+/// Headphones already buffer 150 ms or so of their own, so the ring in front of them runs
+/// half as deep as the speaker's: two frames of game sound held instead of four.
+pub fn bluetooth_ring_capacity(sample_rate: u32) -> usize {
+    sample_rate as usize * 4 / 60
+}
+
 const MAX_WAIT: Duration = Duration::from_millis(50);
 
 struct Inner {
@@ -60,7 +66,10 @@ impl Ring {
     }
 
     pub fn reopen(&self, sample_rate: u32) {
-        let frames = ring_capacity(sample_rate);
+        self.reopen_with(sample_rate, ring_capacity(sample_rate));
+    }
+
+    pub fn reopen_with(&self, sample_rate: u32, frames: usize) {
         let mut i = self.lock();
         i.buf = vec![0; frames * 2];
         i.head = 0;

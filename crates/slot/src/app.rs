@@ -22,6 +22,8 @@ use slot_ui::{
 };
 
 use crate::audio::Sfx;
+use crate::bluetooth::{from_headphones, to_headphones, Bluetooth, BtJob, BtTask, BtView};
+use crate::bt_menu::{BtPage, BtRow, BtScreen, BtState};
 use crate::core_picker::{Chip, CorePicker, Outcome, Press};
 use crate::link_kind::{link_carried, link_kind, serial_option, LinkKind};
 use crate::link_radio::{radio_jobs, LinkRole, RadioJob, RadioJobs};
@@ -254,9 +256,28 @@ pub enum Phase {
         cart: String,
     },
     About,
+    Audio {
+        page: BtPage,
+        row: usize,
+    },
     Doze {
         cart: Option<String>,
     },
+}
+
+const BT_POLL_MS: Millis = 8_000;
+const BT_MENU_POLL_MS: Millis = 2_000;
+const BT_RETRY_MS: Millis = 15_000;
+const BT_FORGET_MS: Millis = 3_000;
+const BT_SETTLE_MS: Millis = 2_000;
+
+/// Sound that moves to another output never arrives louder than this.
+pub const SWITCH_VOLUME_MAX: u8 = 50;
+
+pub struct BtMenuFaces {
+    pub rows: Vec<slot_ui::BtRowFaces>,
+    pub status: Option<slot_ui::BtFace>,
+    pub legend: Vec<(TexId, u32)>,
 }
 
 pub struct App {
@@ -348,6 +369,16 @@ pub struct App {
     powering_off: bool,
     radio: Box<dyn RadioJobs>,
     state_writer: crate::state_writer::StateWriter,
+    bt: Box<dyn Bluetooth>,
+    bt_view: BtView,
+    bt_gen: u64,
+    bt_poll_at: Millis,
+    bt_retry_at: Millis,
+    bt_sent: Option<u8>,
+    bt_sent_at: Millis,
+    bt_pairing: Option<String>,
+    bt_forget: Option<(String, Millis)>,
+    bt_faces: Option<BtMenuFaces>,
 }
 
 const FACE_AHEAD: i32 = 8;
@@ -471,6 +502,16 @@ impl App {
             battery: None,
             last_led: None,
             powering_off: false,
+            bt: crate::bluetooth::bluetooth(),
+            bt_view: BtView::default(),
+            bt_gen: 0,
+            bt_poll_at: 0,
+            bt_retry_at: 0,
+            bt_sent: None,
+            bt_sent_at: 0,
+            bt_pairing: None,
+            bt_forget: None,
+            bt_faces: None,
         }
     }
 
@@ -483,6 +524,7 @@ impl App {
         let mut app = App::new(carts);
         app.root = Some(root.to_path_buf());
         app.state = read_slot_state(root);
+        app.start_bluetooth();
         if app.state.clock_set {
             app.start();
         } else {
@@ -661,7 +703,11 @@ impl App {
             QuickRow::Turbo => Some(QuickValue::flag(self.state.turbo)),
             QuickRow::Rewind => Some(QuickValue::flag(self.state.rewind)),
             QuickRow::RunAhead => QuickValue::frames(self.state.runahead),
-            QuickRow::DateTime | QuickRow::About | QuickRow::Screen | QuickRow::Game => None,
+            QuickRow::DateTime
+            | QuickRow::About
+            | QuickRow::Screen
+            | QuickRow::Game
+            | QuickRow::Audio => None,
         }
     }
 
@@ -1312,6 +1358,279 @@ impl App {
                 }
             }
             Phase::QuickMenu { row } => self.quick_menu_input(row, action),
+            Phase::Audio { page, row } => self.bt_menu_input(page, row, action),
+            _ => {}
+        }
+    }
+
+    pub fn set_bluetooth(&mut self, bt: Box<dyn Bluetooth>) {
+        self.bt = bt;
+        self.bt_gen = u64::MAX;
+    }
+
+    pub fn start_bluetooth(&mut self) {
+        if !self.state.bluetooth {
+            return;
+        }
+        self.bt.ask(BtJob::Up);
+        if let Some(mac) = self.state.bt_device.clone() {
+            self.bt.ask(BtJob::Connect(mac));
+            self.bt_retry_at = self.now() + BT_RETRY_MS;
+        }
+    }
+
+    pub fn bt_view(&self) -> &BtView {
+        &self.bt_view
+    }
+
+    /// Sound goes to the chosen headphones, or nowhere while they are out of reach:
+    /// never to the speaker by surprise.
+    pub fn bt_routed(&self) -> bool {
+        self.state.bluetooth && self.state.bt_device.is_some()
+    }
+
+    fn bt_linked(&self) -> bool {
+        self.bt_routed()
+            && self
+                .state
+                .bt_device
+                .as_deref()
+                .is_some_and(|mac| self.bt_view.connected(mac))
+    }
+
+    fn bt_hardware_volume(&self) -> bool {
+        self.bt_linked() && self.bt_view.volume.is_some()
+    }
+
+    fn sync_bt_volume(&mut self) {
+        if !self.bt_hardware_volume() {
+            return;
+        }
+        let want = to_headphones(self.output_volume());
+        if self.bt_sent != Some(want) {
+            self.bt_sent = Some(want);
+            self.bt_sent_at = self.now();
+            self.bt.ask(BtJob::Volume(want));
+        }
+    }
+
+    fn bt_tick(&mut self) {
+        let generation = self.bt.generation();
+        if generation != self.bt_gen {
+            self.bt_gen = generation;
+            self.bt_view = self.bt.view();
+            self.on_bt_view();
+        }
+        let now = self.now();
+        if let Some((_, at)) = &self.bt_forget {
+            if now.saturating_sub(*at) > BT_FORGET_MS {
+                self.bt_forget = None;
+            }
+        }
+        if !self.state.bluetooth {
+            return;
+        }
+        if now >= self.bt_poll_at {
+            let menu = matches!(self.phase, Phase::Audio { .. });
+            self.bt_poll_at = now + if menu { BT_MENU_POLL_MS } else { BT_POLL_MS };
+            self.bt.ask(BtJob::Status);
+        }
+        if self.bt_routed()
+            && !self.bt_linked()
+            && self.bt_view.busy.is_none()
+            && now >= self.bt_retry_at
+        {
+            self.bt_retry_at = now + BT_RETRY_MS;
+            if let Some(mac) = self.state.bt_device.clone() {
+                self.bt.ask(BtJob::Connect(mac));
+            }
+        }
+    }
+
+    fn on_bt_view(&mut self) {
+        if let Some(mac) = self.bt_pairing.clone() {
+            if self.bt_view.connected(&mac) {
+                self.bt_pairing = None;
+                self.state.bt_device = Some(mac.clone());
+                self.arrive_quietly();
+                self.persist();
+                if let Phase::Audio { page, row } = &mut self.phase {
+                    *page = BtPage::Main;
+                    *row = self
+                        .bt_view
+                        .paired
+                        .iter()
+                        .position(|h| h.mac == mac)
+                        .map_or(0, |i| i + 1);
+                }
+            } else if self.bt_view.busy.is_none() && self.bt_view.failed.is_some() {
+                self.bt_pairing = None;
+            }
+        }
+        if !self.bt_linked() {
+            self.bt_sent = None;
+        } else if let Some(heard) = self.bt_view.volume {
+            match self.bt_sent {
+                // A fresh link: the headphones still hold whatever the last phone set, so
+                // slot's own level goes first.
+                None => self.sync_bt_volume(),
+                Some(sent)
+                    if sent != heard
+                        && self.bt_view.busy.is_none()
+                        && self.now().saturating_sub(self.bt_sent_at) > BT_SETTLE_MS =>
+                {
+                    self.bt_sent = Some(heard);
+                    self.state.volume_bt = from_headphones(heard);
+                    self.state.muted_bt = false;
+                    let now = self.now();
+                    self.hud
+                        .show(HudKind::Volume, self.output_volume(), false, now);
+                    self.persist_soon();
+                }
+                Some(_) => {}
+            }
+        }
+        self.hud.set_headphones(self.headphones || self.bt_linked());
+    }
+
+    fn bt_state(&self) -> BtState<'_> {
+        BtState {
+            view: &self.bt_view,
+            on: self.state.bluetooth,
+            chosen: self.state.bt_device.as_deref(),
+            jack: self.headphones,
+            forget_armed: self.bt_forget.as_ref().map(|(mac, _)| mac.as_str()),
+        }
+    }
+
+    pub fn bt_screen(&self) -> Option<BtScreen> {
+        match self.phase {
+            Phase::Audio { page, row } => Some(crate::bt_menu::screen(page, row, &self.bt_state())),
+            _ => None,
+        }
+    }
+
+    pub fn set_bt_faces(&mut self, faces: BtMenuFaces) {
+        self.bt_faces = Some(faces);
+    }
+
+    fn arrive_quietly(&mut self) {
+        let level = self.level_mut();
+        *level = (*level).min(SWITCH_VOLUME_MAX);
+    }
+
+    fn set_bluetooth_on(&mut self, on: bool) {
+        if on == self.state.bluetooth {
+            return;
+        }
+        let was_routed = self.bt_routed();
+        self.state.bluetooth = on;
+        self.bt_sent = None;
+        if was_routed != self.bt_routed() {
+            self.arrive_quietly();
+        }
+        if on {
+            self.start_bluetooth();
+        } else {
+            self.bt.ask(BtJob::Down);
+        }
+        self.bt_poll_at = self.now();
+        self.persist();
+    }
+
+    fn bt_menu_input(&mut self, page: BtPage, row: usize, action: Action) {
+        let rows = crate::bt_menu::rows(page, &self.bt_state());
+        let n = rows.len().max(1);
+        let row = row.min(n - 1);
+        let at = |row: usize| Phase::Audio { page, row };
+        match action {
+            Action::GbaDown(Btn::Up) => {
+                self.bt_forget = None;
+                self.phase = at((row + n - 1) % n);
+            }
+            Action::GbaDown(Btn::Down) => {
+                self.bt_forget = None;
+                self.phase = at((row + 1) % n);
+            }
+            Action::GbaDown(Btn::B) | Action::QuickMenu => {
+                self.bt_forget = None;
+                self.phase = match page {
+                    BtPage::Main => Phase::QuickMenu {
+                        row: QuickRow::Audio,
+                    },
+                    BtPage::Pair => Phase::Audio {
+                        page: BtPage::Main,
+                        row: crate::bt_menu::rows(BtPage::Main, &self.bt_state())
+                            .iter()
+                            .position(|r| *r == BtRow::PairNew)
+                            .unwrap_or(0),
+                    },
+                };
+            }
+            Action::GbaDown(Btn::Left) | Action::GbaDown(Btn::Right)
+                if rows.get(row) == Some(&BtRow::Power) =>
+            {
+                self.set_bluetooth_on(action == Action::GbaDown(Btn::Right));
+            }
+            Action::GbaDown(Btn::A) => match rows.get(row).cloned() {
+                Some(BtRow::Power) => self.set_bluetooth_on(!self.state.bluetooth),
+                Some(BtRow::Device(mac))
+                    if self.state.bt_device.as_deref() != Some(&mac)
+                        || !self.bt_view.connected(&mac) =>
+                {
+                    self.state.bt_device = Some(mac.clone());
+                    self.bt_sent = None;
+                    self.arrive_quietly();
+                    self.bt.ask(BtJob::Connect(mac));
+                    self.bt_retry_at = self.now() + BT_RETRY_MS;
+                    self.persist();
+                }
+                Some(BtRow::Speaker) if self.state.bt_device.is_some() => {
+                    self.state.bt_device = None;
+                    self.bt_sent = None;
+                    self.arrive_quietly();
+                    self.bt.ask(BtJob::Speaker);
+                    self.persist();
+                }
+                Some(BtRow::PairNew) => {
+                    self.phase = Phase::Audio {
+                        page: BtPage::Pair,
+                        row: 0,
+                    };
+                    self.bt.ask(BtJob::Scan);
+                }
+                Some(BtRow::Found(mac)) if self.bt_view.busy.is_none() => {
+                    self.bt_pairing = Some(mac.clone());
+                    self.bt.ask(BtJob::Pair(mac));
+                }
+                Some(BtRow::Rescan)
+                    if !matches!(self.bt_view.busy, Some((BtTask::Scanning, _))) =>
+                {
+                    self.bt.ask(BtJob::Scan);
+                }
+                Some(BtRow::Device(_) | BtRow::Speaker | BtRow::Found(_) | BtRow::Rescan) => {}
+                None => {}
+            },
+            Action::GbaDown(Btn::Y) => {
+                let Some(BtRow::Device(mac)) = rows.get(row).cloned() else {
+                    return;
+                };
+                let now = self.now();
+                match &self.bt_forget {
+                    Some((armed, _)) if *armed == mac => {
+                        self.bt_forget = None;
+                        if self.state.bt_device.as_deref() == Some(&mac) {
+                            self.state.bt_device = None;
+                            self.bt_sent = None;
+                            self.arrive_quietly();
+                        }
+                        self.bt.ask(BtJob::Forget(mac));
+                        self.persist();
+                        self.phase = at(0);
+                    }
+                    _ => self.bt_forget = Some((mac, now)),
+                }
+            }
             _ => {}
         }
     }
@@ -1347,6 +1666,13 @@ impl App {
                 self.phase = clock_screen(self.utc_secs(), self.state.utc_offset_min, true);
             }
             QuickRow::About => self.phase = Phase::About,
+            QuickRow::Audio => {
+                self.phase = Phase::Audio {
+                    page: BtPage::Main,
+                    row: 0,
+                };
+                self.bt_poll_at = self.now();
+            }
             QuickRow::Screen | QuickRow::Game => {
                 if let Some(row) = row.child() {
                     self.phase = Phase::QuickMenu { row };
@@ -1404,7 +1730,11 @@ impl App {
                 let n = RUN_AHEAD_MAX + 1;
                 s.runahead = (s.runahead + if right { 1 } else { n - 1 }) % n;
             }
-            QuickRow::DateTime | QuickRow::About | QuickRow::Screen | QuickRow::Game => return,
+            QuickRow::DateTime
+            | QuickRow::About
+            | QuickRow::Screen
+            | QuickRow::Game
+            | QuickRow::Audio => return,
         }
         self.persist();
     }
@@ -1481,8 +1811,7 @@ impl App {
         let level = match kind {
             HudKind::Brightness => &mut self.state.brightness,
             HudKind::BlueLight => &mut self.state.blue_light,
-            HudKind::Volume if self.headphones => &mut self.state.volume_hp,
-            HudKind::Volume => &mut self.state.volume,
+            HudKind::Volume => self.level_mut(),
             HudKind::Rewind => return false,
         };
         let moved = *level != value;
@@ -1492,6 +1821,9 @@ impl App {
         self.hud.show(kind, shown, self.muted(), now);
         if let (HudKind::Brightness, Some(power)) = (kind, &mut self.power) {
             power.set_backlight(value);
+        }
+        if kind == HudKind::Volume {
+            self.sync_bt_volume();
         }
         if moved || unmuted {
             self.persist_soon();
@@ -1523,6 +1855,7 @@ impl App {
         *self.muted_mut() = muted;
         self.hud
             .show(HudKind::Volume, self.output_volume(), muted, now);
+        self.sync_bt_volume();
         self.persist_soon();
     }
 
@@ -1563,7 +1896,9 @@ impl App {
     }
 
     fn level(&self) -> u8 {
-        if self.headphones {
+        if self.bt_routed() {
+            self.state.volume_bt
+        } else if self.headphones {
             self.state.volume_hp
         } else {
             self.state.volume
@@ -1571,7 +1906,9 @@ impl App {
     }
 
     fn level_mut(&mut self) -> &mut u8 {
-        if self.headphones {
+        if self.bt_routed() {
+            &mut self.state.volume_bt
+        } else if self.headphones {
             &mut self.state.volume_hp
         } else {
             &mut self.state.volume
@@ -1579,7 +1916,9 @@ impl App {
     }
 
     pub fn muted(&self) -> bool {
-        if self.headphones {
+        if self.bt_routed() {
+            self.state.muted_bt
+        } else if self.headphones {
             self.state.muted_hp
         } else {
             self.state.muted
@@ -1587,7 +1926,9 @@ impl App {
     }
 
     fn muted_mut(&mut self) -> &mut bool {
-        if self.headphones {
+        if self.bt_routed() {
+            &mut self.state.muted_bt
+        } else if self.headphones {
             &mut self.state.muted_hp
         } else {
             &mut self.state.muted
@@ -1599,6 +1940,16 @@ impl App {
             0
         } else {
             self.level()
+        }
+    }
+
+    /// The level the samples are scaled by. Headphones that take their own volume get the
+    /// sound whole and are turned down at the ear, which keeps the quiet end clean.
+    pub fn sample_volume(&self) -> u8 {
+        match self.bt_hardware_volume() {
+            true if self.muted() => 0,
+            true => crate::audio::volume::FULL,
+            false => self.output_volume(),
         }
     }
 
@@ -1754,6 +2105,7 @@ impl App {
 
     fn timers(&mut self) {
         self.play_hold();
+        self.bt_tick();
         let offer = self.undo_label();
         if let Some(p) = &mut self.polaroids {
             p.set_undo(offer);
@@ -1789,7 +2141,7 @@ impl App {
             let on = self.power.as_ref().is_some_and(|p| p.headphones());
             if on != self.headphones {
                 self.headphones = on;
-                self.hud.set_headphones(on);
+                self.hud.set_headphones(on || self.bt_linked());
                 let now = self.now();
                 self.hud
                     .show(HudKind::Volume, self.output_volume(), self.muted(), now);
@@ -2013,6 +2365,21 @@ impl App {
                 faces: self.quick_menu_faces.as_ref(),
             }
             .draw(out),
+            Phase::Audio { row, .. } => {
+                let empty = BtMenuFaces {
+                    rows: Vec::new(),
+                    status: None,
+                    legend: Vec::new(),
+                };
+                let f = self.bt_faces.as_ref().unwrap_or(&empty);
+                slot_ui::BtMenu {
+                    rows: &f.rows,
+                    row: *row,
+                    status: f.status,
+                    legend: &f.legend,
+                }
+                .draw(out)
+            }
             Phase::Shelf => {
                 draw_backdrop(self.wallpaper, out);
                 match (self.core_picker_shown(), self.selected_stem()) {
