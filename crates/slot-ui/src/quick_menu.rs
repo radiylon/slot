@@ -39,10 +39,11 @@ pub enum QuickRow {
     Shader,
     ColourCorrection,
     Palette,
+    Audio,
 }
 
 impl QuickRow {
-    pub const ALL: [QuickRow; 33] = [
+    pub const ALL: [QuickRow; 34] = [
         QuickRow::FastForward,
         QuickRow::FastForwardSound,
         QuickRow::Screen,
@@ -76,12 +77,14 @@ impl QuickRow {
         QuickRow::Shader,
         QuickRow::ColourCorrection,
         QuickRow::Palette,
+        QuickRow::Audio,
     ];
 
-    pub const MAIN: [QuickRow; 4] = [
+    pub const MAIN: [QuickRow; 5] = [
         QuickRow::General,
         QuickRow::Screen,
         QuickRow::Game,
+        QuickRow::Audio,
         QuickRow::About,
     ];
 
@@ -250,6 +253,7 @@ impl QuickRow {
             QuickRow::Shader => "Shader",
             QuickRow::ColourCorrection => "Color Correction",
             QuickRow::Palette => "Palette",
+            QuickRow::Audio => "Audio",
         }
     }
 
@@ -267,6 +271,7 @@ impl QuickRow {
                 | QuickRow::ExitGame
                 | QuickRow::PlayScreen
                 | QuickRow::PlayGameplay
+                | QuickRow::Audio
         )
     }
 

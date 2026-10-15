@@ -227,6 +227,7 @@ fn up_and_down_move_the_bar_and_wrap_at_the_ends() {
         QuickRow::General,
         QuickRow::Screen,
         QuickRow::Game,
+        QuickRow::Audio,
         QuickRow::About,
         QuickRow::General,
     ] {

@@ -1,3 +1,6 @@
+/// Untouched samples.
+pub const FULL: u8 = 100;
+
 pub fn gain(volume: u8) -> f32 {
     let v = volume.min(100) as f32 / 100.0;
     v * v

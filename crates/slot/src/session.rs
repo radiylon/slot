@@ -71,7 +71,7 @@ impl Session {
             return;
         }
         let mut samples = sfx.render(rate);
-        crate::audio::volume::apply(&mut samples, self.app.output_volume());
+        crate::audio::volume::apply(&mut samples, self.app.sample_volume());
         ring.mix(&samples);
     }
 
@@ -217,7 +217,7 @@ impl Session {
             Action::VolumeUp | Action::VolumeDown | Action::MuteToggle
         ) {
             if let Some(emu) = &self.emu {
-                emu.set_volume(self.app.output_volume());
+                emu.set_volume(self.app.sample_volume());
             }
         }
         if menu || self.overlaid() {
@@ -235,7 +235,7 @@ impl Session {
     pub fn update(&mut self, dt: f32) {
         self.bridge_link(|app| app.update(dt));
         if let Some(emu) = &self.emu {
-            emu.set_volume(self.app.output_volume());
+            emu.set_volume(self.app.sample_volume());
         }
         if let Some((client_id, transport)) = self.app.take_link_transport() {
             match &self.emu {
@@ -500,7 +500,7 @@ impl Session {
             Some(p) => EmuHandle::spawn_linked(opened.core, rom, ring, sav, resume, p),
             None => EmuHandle::spawn(opened.core, rom, ring, sav, resume),
         };
-        emu.set_volume(self.app.output_volume());
+        emu.set_volume(self.app.sample_volume());
         emu.set_driven(self.driven);
         self.app.set_snapshot(Box::new(emu.snapshot()));
         self.emu = Some(emu);

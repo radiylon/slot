@@ -60,6 +60,13 @@ pub struct Frontend {
     link_shot: Option<TexId>,
     link_shot_size: (u32, u32),
     link_shot_shown: bool,
+    bt_faces: BtFaces,
+}
+
+#[derive(Default)]
+struct BtFaces {
+    shown: Option<crate::bt_menu::BtScreen>,
+    texes: Vec<TexId>,
 }
 
 #[derive(Default)]
@@ -173,6 +180,7 @@ impl Frontend {
             link_shot: None,
             link_shot_size: (0, 0),
             link_shot_shown: false,
+            bt_faces: BtFaces::default(),
         }
     }
 
@@ -509,6 +517,7 @@ impl Frontend {
         sync_quick_clock(self.session.app_mut(), compositor, &mut self.quick_clock);
         sync_quick_palette(self.session.app_mut(), compositor, &mut self.quick_palette);
         sync_wallpaper(self.session.app_mut(), compositor, &mut self.wallpaper);
+        sync_bluetooth(self.session.app_mut(), compositor, &mut self.bt_faces);
         sync_core_picker(
             self.session.app_mut(),
             compositor,
@@ -996,6 +1005,63 @@ fn sync_quick_palette(app: &mut App, compositor: &mut Compositor, state: &mut Qu
     let lit = upload(compositor, &mut state.lit, lit);
     app.set_quick_palette_faces((dim, dim_size.0, dim_size.1), (lit, lit_size.0, lit_size.1));
     state.shown = text;
+}
+fn sync_bluetooth(app: &mut App, compositor: &mut Compositor, state: &mut BtFaces) {
+    let Some(screen) = app.bt_screen() else {
+        state.shown = None;
+        return;
+    };
+    if state.shown.as_ref() == Some(&screen) {
+        return;
+    }
+    let mut next = 0;
+    let texes = &mut state.texes;
+    let mut up = |face: UndoFace| {
+        let id = match texes.get(next) {
+            Some(id) => {
+                compositor.update_texture(*id, face.w, face.h, &face.rgba);
+                *id
+            }
+            None => {
+                let id = compositor.create_texture(face.w, face.h, &face.rgba);
+                texes.push(id);
+                id
+            }
+        };
+        next += 1;
+        (id, face.w, face.h)
+    };
+    let rows = screen
+        .lines
+        .iter()
+        .map(|line| slot_ui::BtRowFaces {
+            label: up(quick_value_face(&line.label, true)),
+            value: line.value.as_deref().map(|v| {
+                [
+                    up(quick_value_face(v, false)),
+                    up(quick_value_face(v, true)),
+                ]
+            }),
+        })
+        .collect();
+    let status = screen
+        .status
+        .as_deref()
+        .map(|s| up(quick_value_face(s, false)));
+    let legend = screen
+        .legend
+        .iter()
+        .map(|(key, label)| {
+            let (tex, w, _) = up(hint_face(key, label));
+            (tex, w)
+        })
+        .collect();
+    app.set_bt_faces(crate::app::BtMenuFaces {
+        rows,
+        status,
+        legend,
+    });
+    state.shown = Some(screen);
 }
 
 fn sync_about(app: &mut App, compositor: &mut Compositor, state: &mut AboutFace) {
