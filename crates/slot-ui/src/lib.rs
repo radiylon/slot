@@ -2,8 +2,8 @@ mod art;
 pub use art::cover;
 mod bitmaps;
 pub use bitmaps::{
-    link_port, link_port_light, slot_back, slot_back_light, slot_front, slot_front_light, Mould,
-    SLOT_H, SLOT_W,
+    link_port, link_port_light, slot_back, slot_back_light, slot_front, slot_front_light, warm_art,
+    Mould, SLOT_H, SLOT_W,
 };
 mod backdrop;
 mod barcode;

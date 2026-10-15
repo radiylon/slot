@@ -1,7 +1,7 @@
 use crate::draw::{Canvas, Draw, TexId, OUT_H, OUT_W};
 use crate::plate::{arrows_hint_face, centred_hints, hint_face, UndoFace, HINT_H, LEGEND_GAP};
 use crate::power_menu::{MENU_H, MENU_INK, MENU_PAD, MENU_PX};
-use crate::slot_chrome::opening;
+use crate::slot_chrome::{edge, opening};
 use crate::text;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -387,7 +387,6 @@ impl QuickValue {
 pub const QUICK_PITCH: f32 = 52.0;
 pub const QUICK_EDGE: f32 = 32.0;
 pub const QUICK_LABEL_X: f32 = 64.0;
-const POINTER_GAP: f32 = 14.0;
 const POINTER_SCALE: usize = 4;
 const POINTER: [&str; 11] = [
     "X.......", "XX......", "XoX.....", "XooX....", "XoooX...", "XooooX..", "XoooX...", "XooX....",
@@ -396,6 +395,7 @@ const POINTER: [&str; 11] = [
 const POINTER_BLEED: u32 = 4;
 const GROUND_SCRIM: f32 = 0.65;
 const TYPE_DROP: f32 = 4.0;
+const BAR_INSET: f32 = 4.0;
 const CARET_GAP: f32 = 14.0;
 const CARET_PX: f32 = 24.0;
 const LEGEND_Y: f32 = 427.0;
@@ -549,32 +549,22 @@ impl QuickMenu<'_> {
                 });
             }
         }
+        out.push(Draw::Rect {
+            x: 0.0,
+            y: quick_row_top(self.row, self.hidden) + BAR_INSET,
+            w: self.canvas.w,
+            h: QUICK_PITCH - 2.0 * BAR_INSET,
+            colour: edge(),
+        });
         let Some(faces) = self.faces else {
             return;
         };
         let (right, pad) = (self.canvas.w - QUICK_EDGE, MENU_PAD as f32);
-        let main_w = self
-            .row
-            .page()
-            .iter()
-            .filter_map(|r| faces.labels.get(r.index()))
-            .map(|l| l[1].1)
-            .max()
-            .unwrap_or(0);
         for row in self.row.shown(self.hidden) {
             let y = quick_row_top(row, self.hidden) + TYPE_DROP;
             let lit = row == self.row;
-            if let Some(&(tex, w, h)) = faces.labels.get(row.index()).map(|l| &l[lit as usize]) {
-                let x = match row.centred() {
-                    true => self.canvas.centred(main_w as f32),
-                    false => QUICK_LABEL_X - pad,
-                };
-                push(out, tex, x, y, w, h);
-                if lit {
-                    let (tex, pw, ph) = faces.pointer;
-                    let px = x + pad - POINTER_GAP - pw as f32;
-                    push(out, tex, px, y - POINTER_BLEED as f32, pw, ph);
-                }
+            if let Some(&(tex, w, h)) = faces.labels.get(row.index()).map(|l| &l[1]) {
+                push(out, tex, QUICK_EDGE - pad, y, w, h);
             }
             let value = match row {
                 QuickRow::DateTime => self.clock.map(|c| c[lit as usize]),
@@ -645,7 +635,7 @@ pub fn quick_row_top(row: QuickRow, hidden: &[QuickRow]) -> f32 {
     let rows = QUICK_PITCH * row.shown(hidden).len() as f32;
     let top = match row.page() == QuickRow::PLAY_SCREEN {
         true => LEGEND_Y - PANEL_GAP - rows,
-        false => (LEGEND_Y - rows) / 2.0,
+        false => (OUT_H as f32 - rows) / 2.0,
     };
     top + QUICK_PITCH * row.position(hidden) as f32
 }

@@ -251,3 +251,50 @@ pub fn shell_asset(mould: Mould, clear: bool) -> &'static [u8] {
     };
     load(bytes, w, h, slot)
 }
+
+/// Decode every template on spare threads, so the first faces built at boot find them ready
+/// instead of decoding them while the shelf waits.
+pub fn warm_art() {
+    let groups: [fn(); 3] = [
+        || {
+            let _ = shell_asset(Mould::Gba, false);
+            let _ = shell_asset(Mould::Gba, true);
+            let _ = gba_cart();
+            let _ = gba_interior();
+            let _ = board();
+            let _ = socket();
+            let _ = chip();
+            let _ = crate::silhouette::cart_mask();
+        },
+        || {
+            for mould in [Mould::Notched, Mould::Rounded] {
+                let _ = shell_asset(mould, false);
+                let _ = shell_asset(mould, true);
+            }
+            let _ = gb_cart();
+            let _ = gbc_cart();
+            let _ = gb_interior();
+            let _ = gbc_interior();
+            let _ = gb_board();
+            for shell in [crate::GbShell::Notched, crate::GbShell::Rounded] {
+                let _ = crate::silhouette::gb_cart_mask(shell);
+            }
+        },
+        || {
+            let _ = slot_back();
+            let _ = slot_front();
+            let _ = slot_back_light();
+            let _ = slot_front_light();
+            let _ = crate::backdrop::default_background();
+            let _ = crate::backdrop::blur_background();
+            let _ = link_port();
+            let _ = link_port_light();
+            let _ = sticker();
+        },
+    ];
+    for (n, group) in groups.into_iter().enumerate() {
+        let _ = std::thread::Builder::new()
+            .name(format!("slot-art-{n}"))
+            .spawn(group);
+    }
+}

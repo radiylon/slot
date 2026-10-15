@@ -201,6 +201,7 @@ fn the_framed_area_is_black_behind_the_game_as_it_powers_on_a_4_by_3_panel() {
 #[test]
 fn the_shelf_still_shows_behind_the_power_on_on_a_720_panel() {
     let mut a = app_with_carts(&["Emerald", "Zzz"], (720, 480));
+    a.set_wallpaper_pick(slot_store::WallpaperPick::Default);
     a.set_ground(slot_gfx::TexId::from_raw(900));
     a.apply(Action::Insert);
     a.on_core_ready();

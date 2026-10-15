@@ -9,7 +9,6 @@ use slot_input::{Action, Btn};
 use slot_store::{read_slot_state, write_slot_state, Appearance, Shader, SlotState, WallpaperPick};
 use slot_ui::{
     Draw, Icon, QuickMenuFaces, QuickRow, QuickValue, TexId, MENU_PAD, OUT_W, QUICK_EDGE,
-    QUICK_LABEL_X,
 };
 use tempfile::TempDir;
 
@@ -106,8 +105,18 @@ fn the_quick_menu_is_only_on_the_carousel() {
 }
 
 #[test]
+fn a_new_card_starts_on_no_wallpaper() {
+    let (_d, mut a, _) = on_carousel();
+    open_at(&mut a, QuickRow::Wallpaper);
+    assert_eq!(a.resolved_wallpaper(), WallpaperPick::None);
+}
+
+#[test]
 fn wallpaper_cycles_none_random_default_blur_then_the_folder_and_saves() {
-    let (d, mut a, _) = on_carousel();
+    let (d, mut a, _) = on_carousel_with(SlotState {
+        wallpaper: WallpaperPick::Default,
+        ..SlotState::default()
+    });
     let dir = d.path().join("Wallpapers");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("b.png"), b"png").unwrap();
@@ -118,7 +127,7 @@ fn wallpaper_cycles_none_random_default_blur_then_the_folder_and_saves() {
     assert_eq!(
         a.resolved_wallpaper(),
         WallpaperPick::Default,
-        "a new card did not start on Default"
+        "the card did not start on Default"
     );
     press(&mut a, Btn::Right);
     assert_eq!(a.resolved_wallpaper(), WallpaperPick::Blur);
@@ -714,47 +723,38 @@ fn the_arrows_stand_only_around_the_selected_rows_value() {
 }
 
 #[test]
-fn the_pointer_stands_left_of_the_selected_row_and_only_it_is_lit() {
+fn a_full_width_bar_marks_the_selected_row_and_every_label_is_lit() {
     let (_d, mut a, _) = on_carousel();
     fake_faces(&mut a);
     a.apply(Action::QuickMenu);
     for row in QuickRow::MAIN {
         let out = frame(&a);
-        let pointers: Vec<_> = out
-            .iter()
-            .filter(|d| matches!(d, Draw::Tex { tex, .. } if *tex == TexId::from_raw(700)))
-            .collect();
-        assert_eq!(pointers.len(), 1, "{row:?}: {} pointers", pointers.len());
-        let [px, py, pw, ph] = placed(&out, 700).expect("the pointer");
-        let [lx, ly, _, lh] = placed(&out, label(row, true)).expect("the lit label");
-        assert!(
-            px + pw <= lx + MENU_PAD as f32,
-            "{row:?}: the pointer runs into its label"
-        );
-        assert_eq!(
-            py + ph / 2.0,
-            ly + lh / 2.0,
-            "{row:?}: the pointer is off the row"
-        );
-        for other in QuickRow::MAIN.into_iter().filter(|r| *r != row) {
-            assert!(drawn(&out, label(other, false)), "{other:?} is not grey");
-            assert!(!drawn(&out, label(other, true)), "{other:?} is lit");
+        assert!(!drawn(&out, 700), "{row:?}: a pointer was drawn");
+        let top = slot_ui::quick_row_top(row, a.hidden_rows());
+        let bar = out.iter().any(|d| {
+            matches!(*d, Draw::Rect { x, y, w, colour, .. }
+                if x == 0.0 && w == OUT_W as f32 && colour == slot_ui::edge()
+                    && y > top && y < top + slot_ui::QUICK_PITCH)
+        });
+        assert!(bar, "{row:?}: no bar across the selected row");
+        for other in QuickRow::MAIN {
+            assert!(drawn(&out, label(other, true)), "{other:?} is not lit");
+            assert!(!drawn(&out, label(other, false)), "{other:?} is grey");
         }
         press(&mut a, Btn::Down);
     }
 }
 
 #[test]
-fn labels_leave_room_for_the_pointer_and_values_end_thirty_two_pixels_in() {
+fn labels_start_and_values_end_thirty_two_pixels_in() {
     let (_d, mut a, _) = on_carousel();
     fake_faces(&mut a);
     open_at(&mut a, QuickRow::FastForward);
     let out = frame(&a);
     let right = OUT_W as f32 - QUICK_EDGE;
     for row in QuickRow::GAME {
-        let lit = row == QuickRow::FastForward;
-        let [x, ..] = placed(&out, label(row, lit)).expect("a label was not drawn");
-        assert_eq!(x + MENU_PAD as f32, QUICK_LABEL_X, "{row:?}'s label");
+        let [x, ..] = placed(&out, label(row, true)).expect("a label was not drawn");
+        assert_eq!(x + MENU_PAD as f32, QUICK_EDGE, "{row:?}'s label");
     }
     let [x, _, w, _] = placed(&out, value(QuickValue::On, false)).expect("rumble's value");
     assert_eq!(x + w - MENU_PAD as f32, right, "an unselected value");
@@ -864,7 +864,10 @@ fn no_row_in_hand_runs_its_arrows_into_its_label() {
 
 #[test]
 fn the_about_label_sits_on_the_same_tinted_ground_as_the_menu() {
-    let (_d, mut a, _) = on_carousel();
+    let (_d, mut a, _) = on_carousel_with(SlotState {
+        wallpaper: WallpaperPick::Default,
+        ..SlotState::default()
+    });
     fake_faces(&mut a);
     a.set_ground(TexId::from_raw(800));
     a.set_blur(TexId::from_raw(801));
@@ -923,7 +926,10 @@ fn black_washes(draws: &[Draw]) -> Vec<f32> {
 
 #[test]
 fn wallpaper_tint_hides_until_a_wallpaper_of_your_own_is_picked() {
-    let (d, mut a, _) = on_carousel();
+    let (d, mut a, _) = on_carousel_with(SlotState {
+        wallpaper: WallpaperPick::Default,
+        ..SlotState::default()
+    });
     let dir = d.path().join("Wallpapers");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a.png"), b"png").unwrap();

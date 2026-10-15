@@ -109,9 +109,9 @@ impl WallpaperTint {
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum WallpaperPick {
+    #[default]
     None,
     Random,
-    #[default]
     Default,
     Blur,
     File(String),
@@ -306,7 +306,7 @@ impl Default for SlotState {
             gb_palettes: false,
             gb_palette: GbPalette::DEFAULT,
             appearance: Appearance::Dark,
-            wallpaper: WallpaperPick::Default,
+            wallpaper: WallpaperPick::None,
             wallpaper_tint: WallpaperTint::Off,
             show_recents: false,
             show_titles: false,

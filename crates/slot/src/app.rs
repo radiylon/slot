@@ -926,6 +926,10 @@ impl App {
         self.state.wallpaper.clone()
     }
 
+    pub fn set_wallpaper_pick(&mut self, pick: WallpaperPick) {
+        self.state.wallpaper = pick;
+    }
+
     pub fn resolved_wallpaper(&self) -> WallpaperPick {
         match &self.state.wallpaper {
             WallpaperPick::File(name) if !self.wallpaper_files().iter().any(|n| n == name) => {
