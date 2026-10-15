@@ -1,8 +1,12 @@
 use std::path::Path;
+use std::sync::OnceLock;
 
-use slot_gfx::{Draw, TexId, OUT_H, OUT_W};
+use slot_gfx::{Canvas, Draw, TexId, OUT_H, OUT_W};
 
 use crate::art;
+
+const DEFAULT_PNG: &[u8] = include_bytes!("../../../assets/background_default.png");
+const BLUR_PNG: &[u8] = include_bytes!("../../../assets/background_default_blur.png");
 
 const SCRIM: f32 = 0.62;
 
@@ -14,23 +18,49 @@ pub fn bezel_face(path: &Path, w: u32, h: u32) -> Option<Vec<u8>> {
     art::cover(path, w, h)
 }
 
-pub fn draw_backdrop(face: Option<TexId>, out: &mut Vec<Draw>) {
+/// The carousel ground, scaled to cover the whole screen, including behind the footer.
+pub fn default_background() -> Option<&'static [u8]> {
+    static P: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    P.get_or_init(|| art::cover_bytes(DEFAULT_PNG, OUT_W, OUT_H))
+        .as_deref()
+}
+
+/// The blurred carousel ground, scaled to cover the whole screen the same way as the default.
+pub fn blur_background() -> Option<&'static [u8]> {
+    static P: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    P.get_or_init(|| art::cover_bytes(BLUR_PNG, OUT_W, OUT_H))
+        .as_deref()
+}
+
+pub fn draw_ground(canvas: Canvas, face: Option<TexId>, out: &mut Vec<Draw>) {
     let Some(tex) = face else {
         return;
     };
-    out.push(Draw::Tex {
-        x: 0.0,
-        y: 0.0,
-        w: OUT_W as f32,
-        h: OUT_H as f32,
-        tex,
-        alpha: 1.0,
-    });
+    out.push(ground(canvas, tex));
+}
+
+pub fn draw_backdrop(canvas: Canvas, face: Option<TexId>, out: &mut Vec<Draw>) {
+    let Some(tex) = face else {
+        return;
+    };
+    out.push(ground(canvas, tex));
     out.push(Draw::Rect {
         x: 0.0,
         y: 0.0,
-        w: OUT_W as f32,
+        w: canvas.w,
         h: OUT_H as f32,
         colour: [0.0, 0.0, 0.0, SCRIM],
     });
+}
+
+fn ground(canvas: Canvas, tex: TexId) -> Draw {
+    Draw::Part {
+        x: 0.0,
+        y: 0.0,
+        w: canvas.w,
+        h: OUT_H as f32,
+        tex,
+        alpha: 1.0,
+        uv: canvas.window(OUT_W as f32),
+    }
 }

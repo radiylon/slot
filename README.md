@@ -51,12 +51,19 @@ Release notes can be found in the [changelog](CHANGELOG.md).
 | Anbernic 35XX Plus | Yes                        | 1.5.0         |
 | Anbernic RG28XX    | Yes                        | 1.6.0         |
 
-RG28XX support was contributed by [GamerAnim](https://github.com/GamerAnim). Its panel is mounted
-portrait, so slot turns the picture onto it. If it comes out upside down, add `export SLOT_ROTATE=ccw`
-to `System/launch_frontend.sh`.
-
 If you have one of the untested devices, or have tried slot on a device not listed,
 please [open an issue on GitHub](https://github.com/BrandonKowalski/slot/issues) and let me know how it went.
+
+## RG28XX Users
+RG28XX support was contributed by [GamerAnim](https://github.com/GamerAnim). The RG28XX has its panel mounted in a
+portrait orientation. slot turns the picture to fit it, but on some units it comes out upside down.
+If yours does, open `System/launch_frontend.sh` on the SD card and add `export SLOT_ROTATE=ccw` just
+above the last line:
+
+```sh
+export SLOT_ROTATE=ccw
+exec /lib/ld-linux-aarch64.so.1 "$SYS/slot" > "$LOGS/slot.log" 2>&1
+```
 
 ---
 
