@@ -377,6 +377,7 @@ pub struct App {
     quick_wallpaper_faces: Option<[(TexId, u32, u32); 2]>,
     quick_palette_faces: Option<[(TexId, u32, u32); 2]>,
     in_game_menu: Option<QuickRow>,
+    in_game_audio: Option<(BtPage, usize)>,
     states_from_menu: bool,
     menu_tap: Option<(Millis, Option<QuickRow>)>,
     sticker_face: Option<TexId>,
@@ -532,6 +533,7 @@ impl App {
             quick_wallpaper_faces: None,
             quick_palette_faces: None,
             in_game_menu: None,
+            in_game_audio: None,
             states_from_menu: false,
             menu_tap: None,
             sticker_face: None,
@@ -902,7 +904,8 @@ impl App {
             | QuickRow::PlayScreen
             | QuickRow::PlayGameplay
             | QuickRow::Palette
-            | QuickRow::Audio => None,
+            | QuickRow::Audio
+            | QuickRow::PlayAudio => None,
         }
     }
 
@@ -1745,6 +1748,11 @@ impl App {
         if self.game_menu.is_some() {
             return self.game_menu_input(action);
         }
+        if let (Some((page, row)), Phase::Playing { .. }) = (self.audio_over_game(), &self.phase) {
+            if action != Action::Eject {
+                return self.bt_menu_input(page, row, action);
+            }
+        }
         if let (Some(row), Phase::Playing { .. }) = (self.in_game_menu, &self.phase) {
             if action != Action::Eject {
                 return self.in_game_menu_input(row, action);
@@ -1882,7 +1890,7 @@ impl App {
             return;
         }
         if now >= self.bt_poll_at {
-            let menu = matches!(self.phase, Phase::Audio { .. });
+            let menu = self.audio_at().is_some();
             self.bt_poll_at = now + if menu { BT_MENU_POLL_MS } else { BT_POLL_MS };
             self.bt.ask(BtJob::Status);
         }
@@ -1905,14 +1913,14 @@ impl App {
                 self.state.bt_device = Some(mac.clone());
                 self.arrive_quietly();
                 self.persist();
-                if let Phase::Audio { page, row } = &mut self.phase {
-                    *page = BtPage::Main;
-                    *row = self
+                if self.audio_at().is_some() {
+                    let row = self
                         .bt_view
                         .paired
                         .iter()
                         .position(|h| h.mac == mac)
                         .map_or(0, |i| i + 1);
+                    self.set_audio_at(BtPage::Main, row);
                 }
             } else if self.bt_view.busy.is_none() && self.bt_view.failed.is_some() {
                 self.bt_pairing = None;
@@ -1955,10 +1963,48 @@ impl App {
     }
 
     pub fn bt_screen(&self) -> Option<BtScreen> {
+        let (page, row) = self.audio_at()?;
+        Some(crate::bt_menu::screen(page, row, &self.bt_state()))
+    }
+
+    /// Where the Audio page is, whether it was opened from the shelf menu or over a game.
+    fn audio_at(&self) -> Option<(BtPage, usize)> {
         match self.phase {
-            Phase::Audio { page, row } => Some(crate::bt_menu::screen(page, row, &self.bt_state())),
+            Phase::Audio { page, row } => Some((page, row)),
+            _ => self.audio_over_game(),
+        }
+    }
+
+    fn audio_over_game(&self) -> Option<(BtPage, usize)> {
+        match (&self.phase, self.in_game_menu) {
+            (Phase::Playing { .. }, Some(QuickRow::PlayAudio)) => self.in_game_audio,
             _ => None,
         }
+    }
+
+    fn set_audio_at(&mut self, page: BtPage, row: usize) {
+        match self.phase {
+            Phase::Audio { .. } => self.phase = Phase::Audio { page, row },
+            _ => self.in_game_audio = Some((page, row)),
+        }
+    }
+
+    fn draw_audio(&self, row: usize, over_game: bool, out: &mut Vec<Draw>) {
+        let empty = BtMenuFaces {
+            rows: Vec::new(),
+            status: None,
+            legend: Vec::new(),
+        };
+        let f = self.bt_faces.as_ref().unwrap_or(&empty);
+        slot_ui::BtMenu {
+            rows: &f.rows,
+            row,
+            status: f.status,
+            legend: &f.legend,
+            canvas: self.canvas(),
+            over_game,
+        }
+        .draw(out)
     }
 
     pub fn set_bt_faces(&mut self, faces: BtMenuFaces) {
@@ -1993,30 +2039,39 @@ impl App {
         let rows = crate::bt_menu::rows(page, &self.bt_state());
         let n = rows.len().max(1);
         let row = row.min(n - 1);
-        let at = |row: usize| Phase::Audio { page, row };
+        let over_game = self.audio_over_game().is_some();
         match action {
             Action::GbaDown(Btn::Up) => {
                 self.bt_forget = None;
-                self.phase = at((row + n - 1) % n);
+                self.set_audio_at(page, (row + n - 1) % n);
             }
             Action::GbaDown(Btn::Down) => {
                 self.bt_forget = None;
-                self.phase = at((row + 1) % n);
+                self.set_audio_at(page, (row + 1) % n);
+            }
+            // Tapping MENU over a game closes the whole menu, as it does on every in-game page.
+            Action::QuickMenu if over_game => {
+                self.bt_forget = None;
+                self.in_game_audio = None;
+                self.tap_in_game_menu(None);
             }
             Action::GbaDown(Btn::B) | Action::QuickMenu => {
                 self.bt_forget = None;
-                self.phase = match page {
-                    BtPage::Main => Phase::QuickMenu {
-                        row: QuickRow::Audio,
-                    },
-                    BtPage::Pair => Phase::Audio {
-                        page: BtPage::Main,
-                        row: crate::bt_menu::rows(BtPage::Main, &self.bt_state())
+                match page {
+                    BtPage::Main if over_game => self.in_game_audio = None,
+                    BtPage::Main => {
+                        self.phase = Phase::QuickMenu {
+                            row: QuickRow::Audio,
+                        }
+                    }
+                    BtPage::Pair => {
+                        let row = crate::bt_menu::rows(BtPage::Main, &self.bt_state())
                             .iter()
                             .position(|r| *r == BtRow::PairNew)
-                            .unwrap_or(0),
-                    },
-                };
+                            .unwrap_or(0);
+                        self.set_audio_at(BtPage::Main, row);
+                    }
+                }
             }
             Action::GbaDown(Btn::Left) | Action::GbaDown(Btn::Right)
                 if rows.get(row) == Some(&BtRow::Power) =>
@@ -2044,10 +2099,7 @@ impl App {
                     self.persist();
                 }
                 Some(BtRow::PairNew) => {
-                    self.phase = Phase::Audio {
-                        page: BtPage::Pair,
-                        row: 0,
-                    };
+                    self.set_audio_at(BtPage::Pair, 0);
                     self.bt.ask(BtJob::Scan);
                 }
                 Some(BtRow::Found(mac)) if self.bt_view.busy.is_none() => {
@@ -2077,7 +2129,7 @@ impl App {
                         }
                         self.bt.ask(BtJob::Forget(mac));
                         self.persist();
-                        self.phase = at(0);
+                        self.set_audio_at(page, 0);
                     }
                     _ => self.bt_forget = Some((mac, now)),
                 }
@@ -2112,6 +2164,7 @@ impl App {
     }
 
     fn in_game_menu_input(&mut self, row: QuickRow, action: Action) {
+        self.in_game_audio = None;
         let hidden = self.in_game_hidden();
         self.in_game_menu = match action {
             Action::GbaDown(Btn::Up) => Some(row.up(hidden)),
@@ -2131,6 +2184,10 @@ impl App {
             QuickRow::Resume => self.in_game_menu = None,
             QuickRow::States => self.open_states(),
             QuickRow::ExitGame => self.eject(),
+            QuickRow::PlayAudio => {
+                self.in_game_audio = Some((BtPage::Main, 0));
+                self.bt_poll_at = self.now();
+            }
             _ => {
                 if let Some(child) = row.child() {
                     self.in_game_menu = Some(child);
@@ -2140,6 +2197,7 @@ impl App {
     }
 
     fn tap_in_game_menu(&mut self, to: Option<QuickRow>) {
+        self.in_game_audio = None;
         self.menu_tap = Some((self.now(), self.in_game_menu));
         self.in_game_menu = to;
     }
@@ -2217,7 +2275,8 @@ impl App {
             | QuickRow::PlayGameplay
             | QuickRow::Shader
             | QuickRow::ColourCorrection
-            | QuickRow::Palette => {}
+            | QuickRow::Palette
+            | QuickRow::PlayAudio => {}
         }
     }
 
@@ -2320,7 +2379,8 @@ impl App {
             | QuickRow::Shader
             | QuickRow::ColourCorrection
             | QuickRow::Palette
-            | QuickRow::Audio => return,
+            | QuickRow::Audio
+            | QuickRow::PlayAudio => return,
         }
         self.persist();
     }
@@ -3096,22 +3156,7 @@ impl App {
                 canvas: self.canvas(),
             }
             .draw(out),
-            Phase::Audio { row, .. } => {
-                let empty = BtMenuFaces {
-                    rows: Vec::new(),
-                    status: None,
-                    legend: Vec::new(),
-                };
-                let f = self.bt_faces.as_ref().unwrap_or(&empty);
-                slot_ui::BtMenu {
-                    rows: &f.rows,
-                    row: *row,
-                    status: f.status,
-                    legend: &f.legend,
-                    canvas: self.canvas(),
-                }
-                .draw(out)
-            }
+            Phase::Audio { row, .. } => self.draw_audio(*row, false, out),
             Phase::Shelf => {
                 self.draw_background(out);
                 match (self.core_picker_shown(), self.selected_stem()) {
@@ -3211,7 +3256,9 @@ impl App {
                 return;
             }
         }
-        if let (Some(row), Phase::Playing { .. }, true) =
+        if let (Some((_, row)), true) = (self.audio_over_game(), self.screen >= 1.0) {
+            self.draw_audio(row, true, out);
+        } else if let (Some(row), Phase::Playing { .. }, true) =
             (self.in_game_menu_shown(), &self.phase, self.screen >= 1.0)
         {
             QuickMenu {

@@ -442,3 +442,101 @@ fn turning_bluetooth_off_under_the_headphones_brings_the_speaker_back_quietly() 
     assert!(!r.a.bt_routed());
     assert!(r.a.volume() <= SWITCH_VOLUME_MAX);
 }
+
+impl Rig {
+    fn play(&mut self) {
+        self.a.apply(Action::Insert);
+        self.a.on_core_ready();
+        for _ in 0..600 {
+            if matches!(self.a.phase(), Phase::Playing { .. }) {
+                // Let the power-on finish, so the screen is fully up.
+                for _ in 0..120 {
+                    self.a.update(1.0 / 60.0);
+                    self.tick(16);
+                }
+                return;
+            }
+            self.a.update(1.0 / 60.0);
+            self.tick(16);
+        }
+        panic!("the cart never seated: {:?}", self.a.phase());
+    }
+
+    fn open_page_in_game(&mut self) {
+        self.a.apply(Action::QuickMenu);
+        assert_eq!(self.a.in_game_menu(), Some(QuickRow::Resume));
+        for _ in 0..QuickRow::Settings.position(self.a.in_game_hidden()) {
+            self.press(Btn::Down);
+        }
+        self.press(Btn::A);
+        for _ in 0..QuickRow::PlayAudio.position(self.a.in_game_hidden()) {
+            self.press(Btn::Down);
+        }
+        assert_eq!(self.a.in_game_menu(), Some(QuickRow::PlayAudio));
+        assert!(self.a.bt_screen().is_none(), "Audio opened before A");
+        self.press(Btn::A);
+        assert!(self.a.bt_screen().is_some(), "A did not open Audio");
+    }
+
+    fn down_to(&mut self, label: &str) {
+        let at = self
+            .row_labels()
+            .iter()
+            .position(|l| l.starts_with(label))
+            .unwrap_or_else(|| panic!("no {label:?} row in {:?}", self.row_labels()));
+        for _ in 0..at {
+            self.press(Btn::Down);
+        }
+    }
+}
+
+#[test]
+fn audio_opens_over_the_paused_game_and_b_backs_out_to_its_settings() {
+    let mut r = using_pods();
+    r.play();
+    r.open_page_in_game();
+    assert!(
+        matches!(r.a.phase(), Phase::Playing { .. }),
+        "the game was left"
+    );
+    let mut out = Vec::new();
+    r.a.draw(&mut out);
+    assert!(
+        out.iter()
+            .any(|d| matches!(*d, slot_ui::Draw::Rect { colour, .. }
+            if colour[3] > 0.0 && colour[3] < 1.0)),
+        "the game is not dimmed behind the Audio page"
+    );
+    r.press(Btn::B);
+    assert!(r.a.bt_screen().is_none());
+    assert_eq!(r.a.in_game_menu(), Some(QuickRow::PlayAudio));
+    r.press(Btn::B);
+    assert_eq!(r.a.in_game_menu(), Some(QuickRow::Settings));
+}
+
+#[test]
+fn the_speaker_can_be_chosen_mid_game() {
+    let mut r = using_pods();
+    r.play();
+    assert!(r.a.bt_routed());
+    r.open_page_in_game();
+    r.down_to("Speaker");
+    r.press(Btn::A);
+    assert!(!r.a.bt_routed());
+    assert_eq!(r.saved().bt_device, None);
+    assert!(matches!(r.a.phase(), Phase::Playing { .. }));
+}
+
+#[test]
+fn a_tap_of_menu_on_the_in_game_audio_page_resumes_the_game() {
+    let mut r = using_pods();
+    r.play();
+    r.open_page_in_game();
+    r.a.apply(Action::QuickMenu);
+    r.tick(16);
+    assert_eq!(r.a.in_game_menu(), None);
+    assert!(r.a.bt_screen().is_none());
+    r.a.apply(Action::QuickMenu);
+    assert_eq!(r.a.in_game_menu(), Some(QuickRow::Resume));
+    assert!(r.a.bt_screen().is_none(), "Audio came back on its own");
+}

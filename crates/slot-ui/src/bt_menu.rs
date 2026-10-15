@@ -13,6 +13,7 @@ const BAR_INSET: f32 = 4.0;
 const TYPE_DROP: f32 = 4.0;
 const STATUS_Y: f32 = 380.0;
 const LEGEND_Y: f32 = 427.0;
+const GAME_SCRIM: f32 = 0.65;
 
 pub struct BtRowFaces {
     pub label: Face,
@@ -25,6 +26,8 @@ pub struct BtMenu<'a> {
     pub status: Option<Face>,
     pub legend: &'a [(TexId, u32)],
     pub canvas: Canvas,
+    /// Drawn from the in-game menu: the paused game shows dimmed behind the rows.
+    pub over_game: bool,
 }
 
 impl BtMenu<'_> {
@@ -34,7 +37,10 @@ impl BtMenu<'_> {
             y: 0.0,
             w: self.canvas.w,
             h: OUT_H as f32,
-            colour: opening(),
+            colour: match self.over_game {
+                true => [0.0, 0.0, 0.0, GAME_SCRIM],
+                false => opening(),
+            },
         });
         let n = self.rows.len().min(BT_ROWS_MAX);
         if n > 0 {
